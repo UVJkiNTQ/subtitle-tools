@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 编码/媒体产物
+*.mp4
+*.mkv
+*.log
+ffmpeg2pass-*.log*
+encode.log
+
+# 系统/编辑器
+.DS_Store
+.idea/
+.vscode/
+*.swp
