@@ -12,6 +12,8 @@ ffmpeg 交互式压制脚本 (Python 版, 支持任务队列, 可边压边加)
 
 依赖: python3 + ffmpeg (需 libx264 / libsoxr)
 用法:  cd <视频所在目录> && python3 encode.py
+       python3 encode.py <视频文件> [<字幕文件>]   # 预填源文件, 随后进入交互
+       字幕传 - / none / 无字幕 表示不烧录字幕
 """
 
 import glob
@@ -300,16 +302,22 @@ def status_lines():
 
 # ---------------- 任务构建 ----------------
 
-def make_task():
-    """交互式构建一个任务 (状态机, 每步支持 ← 返回上级; 最顶层返回/取消返回 None)."""
-    videos = list_files(VIDEO_EXTS)
-    if not videos:
-        eprint(f"{C_RED}当前目录没有找到视频文件{C_RST}")
-        return None
-    subs = list_files(SUB_EXTS)
-
-    step = 0
-    video = subtitle = mode = param = None
+def make_task(video=None, subtitle=None):
+    """交互式构建一个任务 (状态机, 每步支持 ← 返回上级; 最顶层返回/取消返回 None).
+    给定 video 时跳过视频/字幕选择, 直接从编码模式开始; subtitle 为 "" 表示无字幕."""
+    preset = video is not None
+    mode = param = None
+    if preset:
+        subtitle = subtitle or ""
+        step = 2
+    else:
+        videos = list_files(VIDEO_EXTS)
+        if not videos:
+            eprint(f"{C_RED}当前目录没有找到视频文件{C_RST}")
+            return None
+        subs = list_files(SUB_EXTS)
+        subtitle = None
+        step = 0
     while True:
         if step == 0:   # 选择视频源 (最顶层, 返回 = 取消)
             i = pick("选择视频源", ["← 取消"] + videos)
@@ -329,10 +337,13 @@ def make_task():
                 subtitle = "" if i == 1 else subs[i - 2]
                 step = 2
         elif step == 2:   # 编码模式
-            i = pick("编码模式", ["← 返回上级", "CRF 模式 (默认 23)", "2-pass 模式 (默认 6M)"])
+            back = "← 取消" if preset else "← 返回上级"
+            i = pick("编码模式", [back, "CRF 模式 (默认 23)", "2-pass 模式 (默认 6M)"])
             if i < 0:
                 return None
             if i == 0:
+                if preset:
+                    return None
                 step = 1
             else:
                 mode = "crf" if i == 1 else "2pass"
@@ -367,13 +378,15 @@ def make_task():
                 audio = "copy" if i == 1 else "24bit"
                 break
 
-    output_stem = os.path.splitext(video)[0]
+    # 输出放在视频所在目录, 文件名只用 basename, 避免路径里再嵌子目录
+    video_dir = os.path.dirname(video)
+    output_stem = os.path.splitext(os.path.basename(video))[0]
     if subtitle:
         # 有字幕时把字幕名并入输出名, 避免同视频不同字幕的任务互相覆盖
-        sub_stem = os.path.splitext(subtitle)[0]
-        output = f"{output_stem}.{tag}.{sub_stem}.mp4"
+        sub_stem = os.path.splitext(os.path.basename(subtitle))[0]
+        output = os.path.join(video_dir, f"{output_stem}.{tag}.{sub_stem}.mp4")
     else:
-        output = f"{output_stem}.{tag}.mp4"
+        output = os.path.join(video_dir, f"{output_stem}.{tag}.mp4")
     return {"video": video, "subtitle": subtitle, "mode": mode, "param": param,
             "audio": audio, "output": output}
 
@@ -437,10 +450,46 @@ def encode_one(task):
 
 # ---------------- 主程序 ----------------
 
+def enqueue(task):
+    """把任务加入队列并打印提示 (输出名与待处理任务重复时给出警告)."""
+    with lock:
+        dup = any(x["output"] == task["output"] for x in pending)
+        pending.append(task)
+    log("加入队列: " + task["output"])
+    if dup:
+        print(f"\n{C_RED}⚠ 输出名重复, 后面的任务会覆盖前面的文件!{C_RST}")
+    print(f"\n{C_GRN}▶ 已加入队列: {task['output']}{C_RST}")
+
+
+def parse_args(argv):
+    """解析命令行预填参数; 无参数返回 None, 参数有误返回 False(已打印错误)."""
+    if not argv:
+        return None
+    prog = os.path.basename(sys.argv[0])
+    usage = f"用法: python3 {prog} [<视频文件> [<字幕文件>]]  (字幕传 - 表示无字幕)"
+    if len(argv) > 2:
+        eprint(f"{C_RED}{usage}{C_RST}")
+        return False
+    video = argv[0]
+    if not os.path.isfile(video):
+        eprint(f"{C_RED}视频文件不存在: {video}{C_RST}")
+        return False
+    subtitle = argv[1] if len(argv) > 1 else ""
+    if subtitle.lower() in ("-", "none", "无字幕"):
+        subtitle = ""
+    if subtitle and not os.path.isfile(subtitle):
+        eprint(f"{C_RED}字幕文件不存在: {subtitle}{C_RST}")
+        return False
+    return video, subtitle
+
+
 def main():
     if not shutil.which("ffmpeg"):
         eprint(f"{C_RED}未找到 ffmpeg, 请先安装{C_RST}")
         return 1
+    preset = parse_args(sys.argv[1:])
+    if preset is False:
+        return 2
     wt = threading.Thread(target=worker, daemon=True)
     wt.start()
 
@@ -457,6 +506,11 @@ def main():
         return m
 
     try:
+        # 命令行预填了视频/字幕: 先走完剩余交互 (编码模式/参数/音频) 并入队
+        if preset:
+            t = make_task(*preset)
+            if t:
+                enqueue(t)
         while True:
             # 动态菜单: 每次重绘重算, 任务跑完后选项立即更新为 [添加, 退出]
             i = pick("主菜单", build_menu, header_fn=status_lines)
@@ -474,12 +528,7 @@ def main():
             if choice == "添加压制任务":
                 t = make_task()
                 if t:
-                    with lock:
-                        if any(x["output"] == t["output"] for x in pending):
-                            print(f"\n{C_RED}⚠ 输出名重复, 后面的任务会覆盖前面的文件!{C_RST}")
-                        pending.append(t)
-                    log("加入队列: " + t["output"])
-                    print(f"\n{C_GRN}▶ 已加入队列: {t['output']}{C_RST}")
+                    enqueue(t)
             elif choice == "暂停处理":
                 paused.set()
                 log("已暂停 (当前任务会继续跑完)")
