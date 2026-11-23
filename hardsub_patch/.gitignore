@@ -1,0 +1,30 @@
+# Python / Virtualenv
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Build & Packaging Artifacts
+build/
+dist/
+.cache/
+upx-*/
+*.egg-info/
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Media / Index / Temp Files
+*.lwi
+*.mp4
+*.mkv
+*.ts
+*.avi
+*.mov
+*.ass
+*.ssa
+*.srt
